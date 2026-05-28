@@ -2,6 +2,8 @@
 
 Reduce LLM token usage by up to **70%** with a lossless compression pipeline. Works with Anthropic, OpenAI, or any LLM API — no meaning is lost, just waste.
 
+Built specifically to keep **Claude Code dev sessions** from hitting usage limits, but usable anywhere tokens matter.
+
 ## How it works
 
 TokenShrink runs text through a configurable pipeline of compression techniques before it reaches the model:
@@ -149,10 +151,10 @@ tokenshrink select-context chunks.txt --query "your query" --max-tokens 2000 --s
 
 ### Claude Code Integration
 
-Auto-compress tool outputs and user prompts inside Claude Code sessions:
+TokenShrink installs four hooks into Claude Code that together attack token consumption from every angle:
 
 ```bash
-# Install hooks into Claude Code's settings.local.json
+# Install all hooks into Claude Code's settings.local.json
 python claude_code_integration/install_hooks.py
 
 # Preview changes without writing
@@ -161,15 +163,58 @@ python claude_code_integration/install_hooks.py --dry-run
 # Point to a custom settings file
 python claude_code_integration/install_hooks.py --settings /path/to/settings.local.json
 
-# Remove hooks
+# Remove all hooks
 python claude_code_integration/install_hooks.py --uninstall
 ```
 
-Set `TOKENSHRINK_DEBUG=1` to print compression stats to stderr during Claude Code sessions.
+#### What each hook does
 
-The hooks fire on:
-- **PostToolUse** — compresses output from `Bash`, `Read`, `WebFetch`, `WebSearch`
-- **UserPromptSubmit** — compresses the user's prompt before it reaches the model
+| Hook event | File | What it does |
+|---|---|---|
+| `PreToolUse` | `terse_mode.py` | Injects a brevity nudge once per session so Claude skips narration and batches tool calls |
+| `PostToolUse` | `compress_tool_output.py` | Compresses `Bash`, `Read`, `Grep`, `WebFetch`, `WebSearch` outputs |
+| `UserPromptSubmit` | `compress_user_prompt.py` | Compresses your prompts before they reach the model |
+| `Stop` | `token_budget.py` | Tracks output tokens per session and injects a budget status line |
+
+#### PostToolUse smart filters
+
+The `PostToolUse` hook applies tool-specific logic before generic compression:
+
+**Bash — command-pattern filters**
+
+| Command | What gets stripped |
+|---|---|
+| `pytest` / `python -m unittest` | All passing test lines; keeps only failures + final summary |
+| `npm install` / `pip install` / `yarn add` | Progress bars, HTTP logs; keeps errors + final summary |
+| `git log` | Author and Date header lines; keeps commit message + stats |
+| `ls -la` / `find` | Permissions, owner, group, timestamps; keeps name + size |
+| Any output with a Python traceback | Middle frames; keeps first 3 + last 3 frames per traceback |
+
+**Read — session cache**
+
+When Claude reads the same file a second time without it changing, the hook replaces the full file content with a one-line note:
+
+```
+[TokenShrink: 'core.py' unchanged since last read — 312 lines, 8,450 chars. Request a line range if you need content.]
+```
+
+This eliminates one of the single biggest sources of redundant tokens in refactoring sessions.
+
+**Grep — context deduplication**
+
+Grep results with `-C` context flags often repeat the same surrounding lines across multiple matches. The hook deduplicates identical context blocks and reports how many were removed.
+
+#### Environment variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TOKENSHRINK_DEBUG` | off | Show per-tool compression stats as system messages |
+| `TOKENSHRINK_TERSE` | `1` | Set to `0` to disable the brevity nudge |
+| `TOKENSHRINK_BUDGET` | `1` | Set to `0` to disable the token budget display |
+| `TOKENSHRINK_CONTEXT_WINDOW` | `180000` | Assumed context window size for budget calculations |
+| `TOKENSHRINK_MIN_TOKENS` | `200` | Minimum tool output tokens before compression runs |
+| `TOKENSHRINK_PROMPT_MIN_TOKENS` | `100` | Minimum prompt tokens before compression runs |
+| `TOKENSHRINK_BUDGET_THRESHOLD` | `0.15` | Fraction of context used before budget status appears |
 
 ---
 
@@ -193,8 +238,8 @@ tokenshrink/
 │   ├── counter.py           # Auto-detecting token counter
 │   ├── pipeline.py          # Compression pipeline runner
 │   ├── compressors/
-│   │   ├── whitespace.py    # Whitespace normalization
-│   │   ├── deduplication.py # Exact duplicate removal
+│   │   ├── whitespace.py        # Whitespace normalization
+│   │   ├── deduplication.py     # Exact duplicate removal
 │   │   ├── format_optimizer.py  # JSON/markdown format compression
 │   │   ├── semantic_dedup.py    # MinHash near-duplicate removal
 │   │   ├── rag_selector.py      # BM25 chunk selection
@@ -204,10 +249,12 @@ tokenshrink/
 │       ├── openai_wrapper.py
 │       └── base_wrapper.py
 ├── claude_code_integration/
-│   ├── install_hooks.py
+│   ├── install_hooks.py          # Hook installer / uninstaller
 │   └── hooks/
-│       ├── compress_tool_output.py
-│       └── compress_user_prompt.py
+│       ├── terse_mode.py         # PreToolUse  — brevity nudge
+│       ├── compress_tool_output.py  # PostToolUse — tool output compression
+│       ├── compress_user_prompt.py  # UserPromptSubmit — prompt compression
+│       └── token_budget.py       # Stop        — session budget tracker
 └── tests/
 ```
 

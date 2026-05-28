@@ -43,15 +43,28 @@ def python_cmd() -> str:
 def make_hook_config(settings_path: Path) -> dict:
     tool_output_hook = str(HOOK_ROOT / "compress_tool_output.py")
     user_prompt_hook = str(HOOK_ROOT / "compress_user_prompt.py")
+    terse_mode_hook = str(HOOK_ROOT / "terse_mode.py")
+    token_budget_hook = str(HOOK_ROOT / "token_budget.py")
 
+    py = python_cmd()
     return {
+        "PreToolUse": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f'"{py}" "{terse_mode_hook}"',
+                    }
+                ]
+            }
+        ],
         "PostToolUse": [
             {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f'"{python_cmd()}" "{tool_output_hook}"',
-                        "matcher": "Bash|Read|WebFetch|WebSearch",
+                        "command": f'"{py}" "{tool_output_hook}"',
+                        "matcher": "Bash|Read|Grep|WebFetch|WebSearch",
                     }
                 ]
             }
@@ -61,7 +74,17 @@ def make_hook_config(settings_path: Path) -> dict:
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f'"{python_cmd()}" "{user_prompt_hook}"',
+                        "command": f'"{py}" "{user_prompt_hook}"',
+                    }
+                ]
+            }
+        ],
+        "Stop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f'"{py}" "{token_budget_hook}"',
                     }
                 ]
             }
@@ -71,7 +94,15 @@ def make_hook_config(settings_path: Path) -> dict:
 
 def _is_tokenshrink_hook(hook: dict) -> bool:
     cmd = hook.get("command", "")
-    return "compress_tool_output" in cmd or "compress_user_prompt" in cmd
+    return any(
+        name in cmd
+        for name in (
+            "compress_tool_output",
+            "compress_user_prompt",
+            "terse_mode",
+            "token_budget",
+        )
+    )
 
 
 def install(settings_path: Path, dry_run: bool):
@@ -89,8 +120,11 @@ def install(settings_path: Path, dry_run: bool):
         hooks[event] = [e for e in event_hooks if e.get("hooks")]
 
     save_settings(settings_path, data, dry_run)
-    print("TokenShrink hooks installed.")
-    print("Set TOKENSHRINK_DEBUG=1 to see compression stats in Claude Code sessions.")
+    print("TokenShrink hooks installed (PreToolUse, PostToolUse, UserPromptSubmit, Stop).")
+    print("  TOKENSHRINK_DEBUG=1       — show per-tool compression stats")
+    print("  TOKENSHRINK_TERSE=0       — disable brevity nudge")
+    print("  TOKENSHRINK_BUDGET=0      — disable token budget display")
+    print("  TOKENSHRINK_CONTEXT_WINDOW=N — set assumed context size (default 180000)")
 
 
 def uninstall(settings_path: Path, dry_run: bool):
