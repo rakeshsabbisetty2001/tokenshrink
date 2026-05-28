@@ -13,12 +13,12 @@ Set TOKENSHRINK_TERSE=0 to disable without uninstalling.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
-import tempfile
-from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from claude_code_integration.session_state import session_dir
 
 
 NUDGE = (
@@ -26,13 +26,6 @@ NUDGE = (
     "skip step-by-step narration; prefer bullet points over paragraphs; "
     "batch related tool calls into one response block when possible."
 )
-
-
-def _session_dir(session_id: str) -> Path:
-    key = hashlib.md5(session_id.encode()).hexdigest()[:8]
-    d = Path(tempfile.gettempdir()) / f"tokenshrink_{key}"
-    d.mkdir(exist_ok=True)
-    return d
 
 
 def main() -> None:
@@ -45,7 +38,7 @@ def main() -> None:
         sys.exit(0)
 
     session_id = data.get("session_id", "default")
-    sdir = _session_dir(session_id)
+    sdir = session_dir(session_id)
     flag = sdir / "terse_injected.flag"
 
     if flag.exists():

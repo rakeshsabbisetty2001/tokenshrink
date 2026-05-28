@@ -14,29 +14,17 @@ Set TOKENSHRINK_BUDGET=0 to disable without uninstalling.
 """
 from __future__ import annotations
 
-import hashlib
 import json
-import math
 import os
 import sys
-import tempfile
-from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from claude_code_integration.session_state import SessionState, approx_tokens, session_dir
 
 
 CONTEXT_WINDOW = int(os.environ.get("TOKENSHRINK_CONTEXT_WINDOW", "180000"))
-# Show budget status once output token usage exceeds this fraction of context
 SHOW_THRESHOLD = float(os.environ.get("TOKENSHRINK_BUDGET_THRESHOLD", "0.15"))
-
-
-def _session_dir(session_id: str) -> Path:
-    key = hashlib.md5(session_id.encode()).hexdigest()[:8]
-    d = Path(tempfile.gettempdir()) / f"tokenshrink_{key}"
-    d.mkdir(exist_ok=True)
-    return d
-
-
-def _approx_tokens(text: str) -> int:
-    return math.ceil(len(text.split()) * 1.3)
+COMPACT_THRESHOLD = 0.70
 
 
 def _extract_text(content: object) -> str:
@@ -66,35 +54,57 @@ def main() -> None:
         sys.exit(0)
 
     session_id = data.get("session_id", "default")
-    sdir = _session_dir(session_id)
-    budget_file = sdir / "budget.json"
+    state = SessionState.load(session_id)
 
-    # Load existing tally
-    tally: dict = {"output_tokens": 0, "turns": 0}
-    if budget_file.exists():
-        try:
-            tally = json.loads(budget_file.read_text())
-        except Exception:
-            pass
-
-    # Add this turn's output tokens (assistant message content)
     message = data.get("message", {})
-    if isinstance(message, dict):
-        turn_text = _extract_text(message.get("content", ""))
-        tally["output_tokens"] = tally.get("output_tokens", 0) + _approx_tokens(turn_text)
+    usage = (message.get("usage", {}) or {}) if isinstance(message, dict) else {}
 
-    tally["turns"] = tally.get("turns", 0) + 1
-    budget_file.write_text(json.dumps(tally))
+    # Prefer API-reported token counts from the usage object
+    api_output = usage.get("output_tokens")
+    api_input = usage.get("input_tokens")
 
-    output_tokens = tally["output_tokens"]
-    turns = tally["turns"]
-    fraction = output_tokens / CONTEXT_WINDOW
+    if api_output is not None:
+        turn_output = int(api_output)
+    elif isinstance(message, dict):
+        turn_output = approx_tokens(_extract_text(message.get("content", "")))
+    else:
+        turn_output = 0
+
+    state.output_tokens += turn_output
+
+    # input_tokens from the API represents the full context size for this call
+    if api_input is not None:
+        state.input_tokens = int(api_input)
+
+    state.turns += 1
+
+    # fill_fraction: use API input_tokens (most accurate) or fall back to cumulative output
+    context_used = state.input_tokens if state.input_tokens else state.output_tokens
+    state.fill_fraction = context_used / CONTEXT_WINDOW
+
+    state.save(session_id)
+
+    turns = state.turns
+    fraction = state.fill_fraction
+
+    # One-shot imperative /compact directive when context crosses 70%
+    sdir = session_dir(session_id)
+    compact_flag = sdir / "compact_fired.flag"
+    if fraction >= COMPACT_THRESHOLD and not compact_flag.exists():
+        compact_flag.touch()
+        pct = min(100, int(fraction * 100))
+        msg = (
+            f"[TokenShrink] IMPORTANT: Context is at {pct}%. "
+            "You must call /compact before taking any other action to prevent hitting the context limit."
+        )
+        print(json.dumps({"systemMessage": msg}))
+        sys.exit(0)
 
     # Stay silent for very short sessions unless debug mode
     if fraction < SHOW_THRESHOLD and not os.environ.get("TOKENSHRINK_DEBUG"):
         sys.exit(0)
 
-    remaining = max(0, CONTEXT_WINDOW - output_tokens)
+    remaining = max(0, CONTEXT_WINDOW - context_used)
     pct_used = min(100, fraction * 100)
 
     if pct_used >= 80:
@@ -106,9 +116,10 @@ def main() -> None:
     else:
         hint = ""
 
+    label = "context" if state.input_tokens else "output tokens"
     status = (
         f"[TokenShrink] Turn {turns} | "
-        f"~{_fmt(output_tokens)} output tokens this session | "
+        f"~{_fmt(context_used)} {label} this session | "
         f"~{_fmt(remaining)} remaining{hint}"
     )
 

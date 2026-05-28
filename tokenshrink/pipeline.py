@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+from tokenshrink.compressors.base import Compressor, FunctionCompressor
+
 
 @dataclass
 class CompressorConfig:
     enabled: bool = True
-    # technique-specific thresholds are passed as kwargs to each compressor
     options: dict = field(default_factory=dict)
 
 
@@ -32,24 +33,31 @@ CompressorFn = Callable[[str, dict], str]
 
 
 class Pipeline:
-    """Runs an ordered list of compressor functions, tracking per-stage token counts."""
+    """Runs an ordered list of Compressor objects, tracking per-stage token counts."""
 
     def __init__(self, counter):
         self._counter = counter
-        self._stages: list[tuple[str, CompressorFn, dict]] = []
+        self._stages: list[tuple[Compressor, dict]] = []
 
     def add(self, name: str, fn: CompressorFn, options: dict | None = None) -> "Pipeline":
-        self._stages.append((name, fn, options or {}))
+        """Add a bare function as a lossless compressor (backward-compatible)."""
+        return self.add_compressor(FunctionCompressor(name, fn, lossless=True), options)
+
+    def add_compressor(self, compressor: Compressor, options: dict | None = None) -> "Pipeline":
+        """Add a Compressor object directly."""
+        self._stages.append((compressor, options or {}))
         return self
 
-    def run(self, text: str) -> "PipelineResult":
+    def run(self, text: str, skip_lossy: bool = False) -> "PipelineResult":
         current = text
         stages: list[StageResult] = []
-        for name, fn, opts in self._stages:
+        for compressor, opts in self._stages:
+            if skip_lossy and not compressor.lossless:
+                continue
             before_tokens = self._counter.count(current)
-            current = fn(current, opts)
+            current = compressor.compress(current, opts)
             after_tokens = self._counter.count(current)
-            stages.append(StageResult(name, before_tokens, after_tokens))
+            stages.append(StageResult(compressor.name, before_tokens, after_tokens))
         original_tokens = stages[0].tokens_before if stages else self._counter.count(text)
         final_tokens = self._counter.count(current)
         return PipelineResult(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import math
+import os
 
 
 class TokenCounter:
@@ -10,6 +12,8 @@ class TokenCounter:
         self._backend = backend
         self._model = model
         self._encoder = None
+        self._anthropic_client = None
+        self._count_cache: dict[str, int] = {}  # LRU-style cache for API counts
         self._backend_name = self._resolve_backend(backend, model)
 
     def _resolve_backend(self, backend: str, model: str | None) -> str:
@@ -33,9 +37,10 @@ class TokenCounter:
 
     def _try_anthropic(self) -> bool:
         try:
-            import anthropic  # noqa: F401
+            import anthropic
+            self._anthropic_client = anthropic.Anthropic()
             return True
-        except ImportError:
+        except Exception:
             return False
 
     def count(self, text: str) -> int:
@@ -48,9 +53,27 @@ class TokenCounter:
         return self._approx_count(text)
 
     def _anthropic_count(self, text: str) -> int:
-        # Anthropic SDK doesn't expose a standalone tokenizer; use approximation
-        # that matches their ~4 chars/token heuristic for English prose.
-        return math.ceil(len(text) / 4)
+        # Skip remote counting if disabled or client unavailable
+        if os.environ.get("TOKENSHRINK_NO_REMOTE_COUNT") or self._anthropic_client is None:
+            return math.ceil(len(text) / 4)
+
+        cache_key = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
+        if cache_key in self._count_cache:
+            return self._count_cache[cache_key]
+
+        try:
+            model = self._model or "claude-3-5-sonnet-20241022"
+            response = self._anthropic_client.messages.count_tokens(
+                messages=[{"role": "user", "content": text}],
+                model=model,
+            )
+            result = response.input_tokens
+        except Exception:
+            result = math.ceil(len(text) / 4)
+
+        if len(self._count_cache) < 256:
+            self._count_cache[cache_key] = result
+        return result
 
     def _approx_count(self, text: str) -> int:
         return math.ceil(len(text.split()) * 1.3)

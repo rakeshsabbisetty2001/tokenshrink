@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json as _json
 import re
 
 
@@ -31,18 +32,48 @@ _PATTERNS = [
 ]
 
 
+def _minify_json_blobs(text: str) -> str:
+    """Minify pretty-printed JSON blocks that are paragraph-separated in prose."""
+    segments = re.split(r"(\n{2,})", text)
+    result = []
+    for seg in segments:
+        stripped = seg.strip()
+        if stripped and stripped[0] in "{[":
+            try:
+                result.append(_json.dumps(_json.loads(stripped), separators=(",", ":")))
+                continue
+            except (ValueError, TypeError):
+                pass
+        result.append(seg)
+    return "".join(result)
+
+
 def compress(text: str, opts: dict) -> str:
     if not text:
         return text
 
-    # Preserve fenced code blocks
+    minify_json = opts.get("minify_json", True)
+
+    # Fast path: entire text is a JSON payload
+    if minify_json:
+        stripped = text.strip()
+        if stripped and stripped[0] in "{[":
+            try:
+                return _json.dumps(_json.loads(stripped), separators=(",", ":"))
+            except (ValueError, TypeError):
+                pass
+
+    # Preserve fenced code blocks; apply patterns (and optional JSON minification) to prose
     parts = re.split(r"(```[\s\S]*?```)", text)
     result = []
     for i, part in enumerate(parts):
         if i % 2 == 1:
             result.append(part)
         else:
-            result.append(_apply_patterns(part))
+            processed = _apply_patterns(part)
+            if minify_json:
+                processed = _minify_json_blobs(processed)
+            result.append(processed)
     return "".join(result)
 
 

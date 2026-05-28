@@ -17,7 +17,7 @@ def _tokenize(text: str) -> list[str]:
     return [w for w in re.findall(r"\b\w+\b", text.lower()) if w not in _STOPWORDS]
 
 
-def _bm25_score(query_terms: list[str], doc_terms: list[str], avgdl: float, n_docs: int, df: dict[str, int], k1: float = 1.5, b: float = 0.75) -> float:
+def _bm25_score(query_terms: list[str], doc_terms: list[str], avgdl: float, n_docs: int, df: dict[str, int], k1: float, b: float) -> float:
     tf = Counter(doc_terms)
     dl = len(doc_terms)
     score = 0.0
@@ -36,6 +36,8 @@ def select_chunks(chunks: list[str], query: str, max_tokens: int, counter, opts:
         return chunks
 
     min_score = opts.get("min_score", 0.0)
+    k1 = opts.get("bm25_k1", 1.5)
+    b = opts.get("bm25_b", 0.75)
     query_terms = _tokenize(query)
 
     # Tokenize all docs
@@ -52,7 +54,7 @@ def select_chunks(chunks: list[str], query: str, max_tokens: int, counter, opts:
     # Score each chunk
     scored = []
     for i, (chunk, doc) in enumerate(zip(chunks, doc_tokens)):
-        score = _bm25_score(query_terms, doc, avgdl, n_docs, df)
+        score = _bm25_score(query_terms, doc, avgdl, n_docs, df, k1, b)
         scored.append((score, i, chunk))
 
     # Sort by score descending

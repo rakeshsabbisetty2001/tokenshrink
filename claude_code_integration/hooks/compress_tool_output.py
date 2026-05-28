@@ -13,27 +13,41 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from tokenshrink import TokenShrink
+from claude_code_integration.session_state import SessionState, session_dir
+from claude_code_integration.tool_profiles import apply_fill_escalation, get_profile, load_profiles
 
-MIN_TOKENS = int(os.environ.get("TOKENSHRINK_MIN_TOKENS", "200"))
+_HEAD_TAIL = 20
 COMPRESS_TOOLS = {"Bash", "Read", "WebFetch", "WebSearch", "Grep"}
+_PROFILES = load_profiles()
+
+
+# ── Code block truncation ─────────────────────────────────────────────────────
+
+_CODE_BLOCK_RE = re.compile(r"(```[^\n]*\n)([\s\S]*?)(```)", re.DOTALL)
+
+
+def _truncate_large_code_blocks(text: str, max_lines: int) -> str:
+    """Truncate fenced code blocks over max_lines to head+tail snippets."""
+    def _maybe_truncate(m: re.Match) -> str:
+        opener, content, closer = m.group(1), m.group(2), m.group(3)
+        lines = content.splitlines()
+        if len(lines) <= max_lines:
+            return m.group(0)
+        omitted = len(lines) - _HEAD_TAIL * 2
+        kept = lines[:_HEAD_TAIL] + [f"... ({omitted} lines omitted) ..."] + lines[-_HEAD_TAIL:]
+        return opener + "\n".join(kept) + "\n" + closer
+
+    return _CODE_BLOCK_RE.sub(_maybe_truncate, text)
 
 
 # ── Session cache ─────────────────────────────────────────────────────────────
-
-def _session_dir(session_id: str) -> Path:
-    key = hashlib.md5(session_id.encode()).hexdigest()[:8]
-    d = Path(tempfile.gettempdir()) / f"tokenshrink_{key}"
-    d.mkdir(exist_ok=True)
-    return d
 
 
 # ── Bash command-pattern filters ──────────────────────────────────────────────
@@ -207,7 +221,7 @@ def check_read_cache(session_id: str, file_path: str, content: str) -> tuple[boo
     Returns (cache_hit, text).  On a hit the text is a short note; on a miss
     the cache entry is written and the original content is returned unchanged.
     """
-    sdir = _session_dir(session_id)
+    sdir = session_dir(session_id)
     cache_file = sdir / f"read_{hashlib.md5(file_path.encode()).hexdigest()}.json"
     content_hash = hashlib.md5(content.encode()).hexdigest()
 
@@ -263,12 +277,19 @@ def main() -> None:
     elif tool_name == "Grep":
         processed = deduplicate_grep(processed)
 
+    # ── Per-tool profile + adaptive fill escalation ───────────────────────────
+    fill = SessionState.load(session_id).fill_fraction
+    profile = apply_fill_escalation(get_profile(tool_name, _PROFILES), fill)
+
+    # ── Code block truncation ─────────────────────────────────────────────────
+    processed = _truncate_large_code_blocks(processed, profile.max_code_block_lines)
+
     # ── Generic TokenShrink compression ──────────────────────────────────────
-    ts = TokenShrink()
+    ts = TokenShrink(techniques=profile.techniques)
     original_tokens = ts.count_tokens(output)
     current_tokens = ts.count_tokens(processed)
 
-    if current_tokens >= MIN_TOKENS:
+    if current_tokens >= profile.min_tokens:
         result = ts.compress_prompt(processed)
         if result.compressed_tokens < current_tokens:
             processed = result.compressed_text

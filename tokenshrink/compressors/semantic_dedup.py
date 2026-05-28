@@ -42,6 +42,12 @@ def _jaccard_approx(sig_a: list[int], sig_b: list[int]) -> float:
 
 def compress(text: str, opts: dict) -> str:
     """Remove near-duplicate sentences using MinHash + Jaccard similarity."""
+    seen_sigs: list[list[int]] = []
+    return compress_with_seen(text, seen_sigs, opts)
+
+
+def compress_with_seen(text: str, seen_sigs: list[list[int]], opts: dict) -> str:
+    """Like compress(), but shares seen_sigs with the caller for cross-text deduplication."""
     if not text:
         return text
 
@@ -55,7 +61,6 @@ def compress(text: str, opts: dict) -> str:
         units = _split_sentences(text)
         separator = " "
 
-    seen_sigs: list[list[int]] = []
     kept: list[str] = []
 
     for unit_text in units:

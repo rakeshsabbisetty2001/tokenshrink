@@ -73,7 +73,7 @@ def compress_conversation(file, keep_recent, model, stats):
             " ".join(b.get("text", "") for b in m.get("content", []) if isinstance(b, dict))
             for m in compressed
         ))
-        click.echo(f"\nTokens: {before} → {after}  ({_pct(before, after):.1f}% reduction)", err=True)
+        click.echo(f"\nTokens: {before} ->{after}  ({_pct(before, after):.1f}% reduction)", err=True)
 
 
 @main.command("select-context")
@@ -82,8 +82,10 @@ def compress_conversation(file, keep_recent, model, stats):
 @click.option("--max-tokens", default=2000, show_default=True, help="Token budget for selected chunks.")
 @click.option("--chunk-sep", default="---", show_default=True, help="Separator between chunks in input.")
 @click.option("--model", default=None, help="Model name for token counting.")
+@click.option("--bm25-k1", default=1.5, show_default=True, type=float, help="BM25 k1 parameter (term saturation).")
+@click.option("--bm25-b", default=0.75, show_default=True, type=float, help="BM25 b parameter (length normalization).")
 @click.option("--stats", is_flag=True, help="Print selection stats.")
-def select_context(file, query, max_tokens, chunk_sep, model, stats):
+def select_context(file, query, max_tokens, chunk_sep, model, bm25_k1, bm25_b, stats):
     """Select the most relevant RAG chunks within a token budget using BM25 scoring."""
     if file == "-":
         raw = sys.stdin.read()
@@ -92,13 +94,13 @@ def select_context(file, query, max_tokens, chunk_sep, model, stats):
             raw = f.read()
 
     chunks = [c.strip() for c in raw.split(chunk_sep) if c.strip()]
-    ts = TokenShrink(model=model, rag_max_tokens=max_tokens)
+    ts = TokenShrink(model=model, rag_max_tokens=max_tokens, bm25_k1=bm25_k1, bm25_b=bm25_b)
     selected = ts.select_context(chunks, query=query, max_tokens=max_tokens)
 
     click.echo(f"\n{chunk_sep}\n".join(selected))
 
     if stats:
-        click.echo(f"\nChunks: {len(chunks)} → {len(selected)}  ({len(selected)/max(len(chunks),1)*100:.0f}% kept)", err=True)
+        click.echo(f"\nChunks: {len(chunks)} ->{len(selected)}  ({len(selected)/max(len(chunks),1)*100:.0f}% kept)", err=True)
 
 
 @main.command("benchmark")
@@ -111,7 +113,7 @@ def benchmark(file, model, techniques):
         text = sys.stdin.read()
     else:
         with open(file) as f:
-            text = sys.stdin.read() if file == "-" else open(file).read()
+            text = f.read()
 
     tech_list = [t.strip() for t in techniques.split(",")] if techniques else [
         "whitespace", "deduplication", "format", "semantic_dedup"
@@ -131,8 +133,8 @@ def benchmark(file, model, techniques):
 def _print_stats(original: int, compressed: int, stages):
     click.echo(f"\n--- TokenShrink Stats ---", err=True)
     for stage in stages:
-        click.echo(f"  {stage.name}: {stage.tokens_before} → {stage.tokens_after} ({stage.ratio*100:.1f}% saved)", err=True)
-    click.echo(f"  TOTAL: {original} → {compressed} ({_pct(original, compressed):.1f}% reduction)", err=True)
+        click.echo(f"  {stage.name}: {stage.tokens_before} ->{stage.tokens_after} ({stage.ratio*100:.1f}% saved)", err=True)
+    click.echo(f"  TOTAL: {original} ->{compressed} ({_pct(original, compressed):.1f}% reduction)", err=True)
 
 
 def _pct(before: int, after: int) -> float:

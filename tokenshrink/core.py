@@ -40,6 +40,8 @@ class TokenShrink:
         rag_max_tokens: int = 2000,
         keep_recent: int = 5,
         indent_spaces: int = 2,
+        bm25_k1: float = 1.5,
+        bm25_b: float = 0.75,
     ):
         self._counter = TokenCounter(backend=tokenizer, model=model)
         self._techniques = set(techniques) if techniques else {
@@ -49,6 +51,8 @@ class TokenShrink:
             "similarity_threshold": similarity_threshold,
             "min_score": rag_min_score,
             "indent_spaces": indent_spaces,
+            "bm25_k1": bm25_k1,
+            "bm25_b": bm25_b,
         }
         self._rag_max_tokens = rag_max_tokens
         self._keep_recent = keep_recent
@@ -75,10 +79,15 @@ class TokenShrink:
         )
 
     def compress_conversation(
-        self, messages: list[dict], keep_recent: int | None = None
+        self,
+        messages: list[dict],
+        keep_recent: int | None = None,
+        summarize: bool = False,
+        summarize_ratio: int = 3,
     ) -> list[dict]:
         n = keep_recent if keep_recent is not None else self._keep_recent
-        return conv_compressor.compress_messages(messages, n, self._counter, self._opts)
+        opts = {**self._opts, "summarize_old_turns": summarize, "summarize_ratio": summarize_ratio}
+        return conv_compressor.compress_messages(messages, n, self._counter, opts)
 
     def select_context(
         self,
