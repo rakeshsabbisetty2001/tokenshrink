@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tokenshrink"
+version = "0.1.0"
+description = "Reduce LLM token usage by 70% with a lossless compression pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+tiktoken = ["tiktoken>=0.5"]
+anthropic = ["anthropic>=0.20"]
+openai = ["openai>=1.0"]
+all = ["tiktoken>=0.5", "anthropic>=0.20", "openai>=1.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
+
+[project.scripts]
+tokenshrink = "tokenshrink.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tokenshrink*"]
