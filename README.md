@@ -103,6 +103,37 @@ with ts.wrap(client) as c:
 
 Works with both Anthropic and OpenAI clients.
 
+**Semantic response cache (avoid re-calling the API for near-identical prompts):**
+```python
+from tokenshrink import TokenShrink, SemanticCache
+from tokenshrink.wrappers.anthropic_wrapper import AnthropicWrapper
+
+ts = TokenShrink()
+cache = SemanticCache(
+    path="~/.tokenshrink/cache.db",  # default
+    ttl=3600,                         # seconds before entries expire
+    threshold=0.95,                   # SimHash similarity required for a hit
+)
+
+wrapper = AnthropicWrapper(client, ts, cache=cache)
+response = wrapper.messages.create(model="claude-sonnet-4-6", messages=[...])
+
+# Subsequent calls with near-identical prompts hit the cache instead of the API
+print(cache.stats())
+# {'hits': 1, 'misses': 1, 'hit_rate': 0.5, 'total_entries': 1, ...}
+
+cache.clear_expired()   # evict stale entries
+cache.close()
+```
+
+**Trim an OpenAPI or GraphQL schema to what's relevant for a task:**
+```python
+from tokenshrink.compressors.schema_trimmer import trim_schema
+
+# Pass raw JSON/YAML OpenAPI or GraphQL SDL text
+trimmed = trim_schema(schema_text, task="create a new user account", top_k=10)
+```
+
 **Streaming compression (for Anthropic streaming API):**
 ```python
 from tokenshrink import TokenShrink
@@ -180,6 +211,10 @@ tokenshrink compress-conversation messages.json --keep-recent 5 --stats
 tokenshrink select-context chunks.txt --query "your query" --max-tokens 2000 --stats
 tokenshrink select-context chunks.txt --query "code query" --bm25-k1 1.2 --bm25-b 0.5
 
+# Trim an OpenAPI / GraphQL schema to relevant operations
+tokenshrink trim-schema openapi.json --task "create a new user" --top-k 10
+tokenshrink trim-schema schema.graphql --task "fetch user profile" --output json
+
 # Install / remove Claude Code hooks
 tokenshrink install-hooks
 tokenshrink install-hooks --settings /path/to/settings.local.json --dry-run
@@ -191,7 +226,7 @@ tokenshrink uninstall-hooks
 | Flag | Description |
 |---|---|
 | `--stats` | Print token counts and reduction % |
-| `--output json` | Output as JSON (compress-prompt only) |
+| `--output json` | Output as JSON |
 | `--model` | Model name for accurate token counting (e.g. `gpt-4o`, `claude-3-5-sonnet`) |
 | `--techniques` | Comma-separated list of techniques to apply |
 | `--keep-recent` | Number of recent conversation turns to keep verbatim (default: 5) |
@@ -199,6 +234,8 @@ tokenshrink uninstall-hooks
 | `--chunk-sep` | Separator between RAG chunks in input file (default: `---`) |
 | `--bm25-k1` | BM25 term saturation parameter (default: 1.5; try 1.2 for code) |
 | `--bm25-b` | BM25 length normalization parameter (default: 0.75; try 0.5 for code) |
+| `--task` | Task description for schema trimming (trim-schema) |
+| `--top-k` | Max operations to keep when trimming a schema (default: 10) |
 | `--settings` | Path to Claude Code settings.local.json (install/uninstall-hooks) |
 | `--dry-run` | Preview hook changes without writing (install/uninstall-hooks) |
 
@@ -206,7 +243,7 @@ tokenshrink uninstall-hooks
 
 ### Claude Code Integration
 
-TokenShrink installs four hooks into Claude Code that together attack token consumption from every angle:
+TokenShrink installs five hooks into Claude Code that together attack token consumption from every angle:
 
 ```bash
 # Install all hooks (CLI — preferred)
@@ -230,6 +267,7 @@ tokenshrink uninstall-hooks
 | Hook event | File | What it does |
 |---|---|---|
 | `PreToolUse` | `terse_mode.py` | Injects a brevity nudge once per session so Claude skips narration and batches tool calls |
+| `PreToolUse` | `command_rewriter.py` | Rewrites expensive Bash commands to cheaper equivalents based on context fill level |
 | `PostToolUse` | `compress_tool_output.py` | Compresses `Bash`, `Read`, `Grep`, `WebFetch`, `WebSearch` outputs using per-tool profiles |
 | `UserPromptSubmit` | `compress_user_prompt.py` | Compresses your prompts before they reach the model |
 | `Stop` | `token_budget.py` | Tracks session context usage (input + output tokens) and injects a budget status line |
@@ -267,6 +305,21 @@ Each tool gets a tuned default profile. Override with `TOKENSHRINK_TOOL_PROFILES
 
 Large fenced code blocks in tool output are automatically truncated to the first + last 20 lines with an omission marker (configurable via `TOKENSHRINK_MAX_CODE_BLOCK_LINES`).
 
+#### PreToolUse command rewriter
+
+The `command_rewriter` hook intercepts Bash commands before they run and rewrites expensive ones to cheaper equivalents. Rules activate based on context fill fraction:
+
+| Fill level | Original command | Rewritten to |
+|---|---|---|
+| Always | `cat <file>` | `head -100 <file>` |
+| Always | `pip list` | `pip list \| head -30` |
+| ≥ 40% | `find . -name "*.py"` | `find . -name "*.py" \| head -50` |
+| ≥ 40% | `ls -la` | `ls -la \| head -40` |
+| ≥ 70% | `npm test` | `npm test -- --reporter=min` |
+| ≥ 70% | `cargo test` | `cargo test 2>&1 \| tail -50` |
+
+A `systemMessage` is emitted so Claude knows the command was rewritten.
+
 #### PostToolUse smart filters
 
 The `PostToolUse` hook applies tool-specific logic before generic compression:
@@ -276,18 +329,34 @@ The `PostToolUse` hook applies tool-specific logic before generic compression:
 | Command | What gets stripped |
 |---|---|
 | `pytest` / `python -m unittest` | All passing test lines; keeps only failures + final summary |
+| `jest` / `vitest` | Passing suite lines collapsed to a count; keeps failures + summary |
 | `npm install` / `pip install` / `yarn add` | Progress bars, HTTP logs; keeps errors + final summary |
 | `git log` | Author and Date header lines; keeps commit message + stats |
 | `ls -la` / `find` | Permissions, owner, group, timestamps; keeps name + size |
+| `tsc` | Errors grouped by file with location; warning counts summarised |
+| `webpack` / `cargo build` / `make` | Errors listed, warnings summarised by rule, last 5 lines kept |
+| `eslint` / `ruff` / `flake8` | Duplicate warning rules deduplicated; all errors kept |
 | Any output with a Python traceback | Middle frames; keeps first 3 + last 3 frames per traceback |
 
-**Read — session cache**
+**Read — session cache with delta compression**
 
 When Claude reads the same file a second time without it changing, the hook replaces the full file content with a one-line note:
 
 ```
 [TokenShrink: 'core.py' unchanged since last read — 312 lines, 8,450 chars. Request a line range if you need content.]
 ```
+
+When the file *has* changed, the hook computes a unified diff and emits just the diff if it is less than 30% of the new file size:
+
+```
+[TokenShrink: showing diff vs turn 4]
+--- core.py (turn 4)
++++ core.py (current)
+@@ -12,7 +12,7 @@
+...
+```
+
+File content is cached up to 200 KB per file to limit session directory growth.
 
 **Grep — context deduplication**
 
@@ -350,7 +419,7 @@ pytest --cov=tokenshrink              # with coverage
 pytest tests/test_benchmark_regression.py -v   # benchmark regression suite
 ```
 
-The test suite has **132 tests** across 11 modules:
+The test suite has **192 tests** across 15 modules:
 
 | Module | What it covers |
 |---|---|
@@ -362,9 +431,13 @@ The test suite has **132 tests** across 11 modules:
 | `test_conversation.py` | Cross-turn compression and extractive summarization |
 | `test_integration.py` | End-to-end compression ratios on realistic fixtures |
 | `test_benchmark_regression.py` | Minimum reduction % and quality score thresholds per technique |
-| `test_hooks.py` | All 4 Claude Code hooks (stdin/stdout simulation) |
+| `test_hooks.py` | All Claude Code hooks (stdin/stdout simulation) |
 | `test_counter.py` | TokenCounter backends, LRU cache, env var override |
 | `test_edge_cases.py` | Empty inputs, malformed JSON, None inputs, broken code blocks, pipeline fault isolation, Unicode |
+| `test_command_rewriter.py` | Fill-fraction rule table, hook stdin/stdout |
+| `test_delta_tracker.py` | Read cache hit/miss, unified diff emission, 200 KB cap |
+| `test_schema_trimmer.py` | OpenAPI operation scoring/stripping, GraphQL docstring trimming, auto-detect |
+| `test_semantic_cache.py` | SimHash, SQLite backend, TTL, threshold, AnthropicWrapper integration |
 
 ---
 
@@ -374,10 +447,12 @@ The test suite has **132 tests** across 11 modules:
 tokenshrink/
 ├── tokenshrink/
 │   ├── core.py              # TokenShrink main class
-│   ├── cli.py               # Click CLI (compress-prompt, benchmark, install-hooks, ...)
+│   ├── cli.py               # Click CLI (compress-prompt, benchmark, trim-schema, install-hooks, ...)
 │   ├── counter.py           # Auto-detecting token counter (tiktoken / Anthropic API / approx)
 │   ├── pipeline.py          # Compression pipeline runner with quality_score metrics
 │   ├── streaming.py         # StreamingCompressor — chunk-based generator for streaming APIs
+│   ├── cache/
+│   │   └── semantic_cache.py    # SimHash + SQLite semantic response cache
 │   ├── compressors/
 │   │   ├── base.py              # Compressor protocol + FunctionCompressor adapter
 │   │   ├── whitespace.py        # Whitespace normalization
@@ -385,20 +460,23 @@ tokenshrink/
 │   │   ├── format_optimizer.py  # XML/markdown boilerplate + JSON minification
 │   │   ├── semantic_dedup.py    # MinHash near-duplicate removal (cross-turn + code-aware)
 │   │   ├── rag_selector.py      # BM25 chunk selection (configurable k1/b)
-│   │   └── conversation.py      # Conversation history compression + extractive summarization
+│   │   ├── conversation.py      # Conversation history compression + extractive summarization
+│   │   └── schema_trimmer.py    # OpenAPI / GraphQL schema trimmer (BM25-scored)
 │   └── wrappers/
-│       ├── anthropic_wrapper.py
+│       ├── anthropic_wrapper.py  # Transparent proxy with optional SemanticCache
 │       ├── openai_wrapper.py
 │       └── base_wrapper.py
 ├── claude_code_integration/
 │   ├── install_hooks.py          # Hook installer / uninstaller
 │   ├── session_state.py          # Persistent session state (~/.claude/tokenshrink/)
 │   ├── tool_profiles.py          # Per-tool compression profiles + fill escalation
+│   ├── command_rules.py          # Fill-fraction rule table for command rewriting
 │   └── hooks/
-│       ├── terse_mode.py         # PreToolUse  — brevity nudge
-│       ├── compress_tool_output.py  # PostToolUse — tool output compression
+│       ├── terse_mode.py            # PreToolUse  — brevity nudge
+│       ├── command_rewriter.py      # PreToolUse  — Bash command rewriter
+│       ├── compress_tool_output.py  # PostToolUse — tool output compression + delta tracking
 │       ├── compress_user_prompt.py  # UserPromptSubmit — prompt compression
-│       └── token_budget.py       # Stop        — session budget tracker + /compact directive
+│       └── token_budget.py          # Stop        — session budget tracker + /compact directive
 └── tests/
     ├── fixtures/
     │   ├── benchmark_corpus.py   # Representative inputs for regression benchmarks
@@ -407,7 +485,11 @@ tokenshrink/
     ├── test_benchmark_regression.py  # Compressor regression + quality score suite
     ├── test_hooks.py             # Claude Code hook integration tests
     ├── test_counter.py           # TokenCounter unit tests
-    └── test_edge_cases.py        # Robustness: empty, malformed, Unicode, fault isolation
+    ├── test_edge_cases.py        # Robustness: empty, malformed, Unicode, fault isolation
+    ├── test_command_rewriter.py  # PreToolUse command rewriter
+    ├── test_delta_tracker.py     # Read cache delta compression
+    ├── test_schema_trimmer.py    # OpenAPI / GraphQL schema trimmer
+    └── test_semantic_cache.py    # SemanticCache unit + wrapper integration
 ```
 
 ---
