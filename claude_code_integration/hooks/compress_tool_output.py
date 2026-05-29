@@ -11,6 +11,7 @@ Output: JSON on stdout — hookSpecificOutput.updatedToolOutput (if compressed)
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -417,10 +418,18 @@ def deduplicate_grep(output: str) -> str:
 
 # ── Read-tool session cache ───────────────────────────────────────────────────
 
+_MAX_CACHED_BYTES = 200 * 1024  # 200 KB per file
+
+
 def check_read_cache(session_id: str, file_path: str, content: str) -> tuple[bool, str]:
     """
-    Returns (cache_hit, text).  On a hit the text is a short note; on a miss
-    the cache entry is written and the original content is returned unchanged.
+    Returns (cache_hit, text).
+
+    - Identical content: returns a short "unchanged" note.
+    - Changed content (diff < 30% of new size): returns the unified diff.
+    - Changed content (large diff) or first read: stores content and returns unchanged.
+
+    Content is capped at _MAX_CACHED_BYTES to limit session dir growth.
     """
     sdir = session_dir(session_id)
     cache_file = sdir / f"read_{hashlib.md5(file_path.encode()).hexdigest()}.json"
@@ -435,11 +444,39 @@ def check_read_cache(session_id: str, file_path: str, content: str) -> tuple[boo
                     f"[TokenShrink: '{os.path.basename(file_path)}' unchanged since last read "
                     f"— {lines} lines, {len(content)} chars. Request a line range if you need content.]"
                 )
+
+            # Content changed — attempt delta compression
+            prev_content = cached.get("content")
+            prev_turn = cached.get("turn", 0)
+            if prev_content is not None:
+                diff_lines = list(difflib.unified_diff(
+                    prev_content.splitlines(keepends=True),
+                    content.splitlines(keepends=True),
+                    fromfile=f"{os.path.basename(file_path)} (turn {prev_turn})",
+                    tofile=f"{os.path.basename(file_path)} (current)",
+                    lineterm="",
+                ))
+                diff_text = "".join(diff_lines)
+                if len(diff_text) < len(content) * 0.30:
+                    # Store updated content for next diff
+                    _write_cache(cache_file, content_hash, file_path, content, session_id)
+                    return True, (
+                        f"[TokenShrink: showing diff vs turn {prev_turn}]\n{diff_text}"
+                    )
         except Exception:
             pass
 
-    cache_file.write_text(json.dumps({"hash": content_hash, "path": file_path}))
+    _write_cache(cache_file, content_hash, file_path, content, session_id)
     return False, content
+
+
+def _write_cache(cache_file: Path, content_hash: str, file_path: str, content: str, session_id: str) -> None:
+    from claude_code_integration.session_state import SessionState
+    turn = SessionState.load(session_id).turn_number
+    payload: dict = {"hash": content_hash, "path": file_path, "turn": turn}
+    if len(content.encode()) <= _MAX_CACHED_BYTES:
+        payload["content"] = content
+    cache_file.write_text(json.dumps(payload))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

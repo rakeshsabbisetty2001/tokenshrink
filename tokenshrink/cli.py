@@ -158,6 +158,34 @@ def estimate_cost(text, model, no_compression, output):
         click.echo(str(estimate))
 
 
+@main.command("trim-schema")
+@click.argument("file", default="-")
+@click.option("--task", required=True, help="Task description to score operations against.")
+@click.option("--top-k", default=10, show_default=True, type=int, help="Number of operations to keep.")
+@click.option("--output", type=click.Choice(["text", "json"]), default="text", help="Output format (text=schema, json=schema+stats).")
+def trim_schema(file, task, top_k, output):
+    """Trim an OpenAPI or GraphQL schema to operations relevant to a task."""
+    from .compressors.schema_trimmer import trim_schema as _trim
+
+    if file == "-":
+        text = sys.stdin.read()
+    else:
+        with open(file) as f:
+            text = f.read()
+
+    trimmed = _trim(text, task=task, top_k=top_k)
+
+    if output == "json":
+        click.echo(json.dumps({
+            "trimmed": trimmed,
+            "original_chars": len(text),
+            "trimmed_chars": len(trimmed),
+            "reduction_pct": round((len(text) - len(trimmed)) / max(len(text), 1) * 100, 1),
+        }, indent=2))
+    else:
+        click.echo(trimmed)
+
+
 @main.command("install-hooks")
 @click.option(
     "--settings",

@@ -64,6 +64,7 @@ class SessionState:
     input_tokens: int = 0
     turns: int = 0
     fill_fraction: float = 0.0
+    turn_number: int = 0
 
     @classmethod
     def load(cls, session_id: str) -> "SessionState":
@@ -76,6 +77,7 @@ class SessionState:
                     input_tokens=int(raw.get("input_tokens", 0)),
                     turns=int(raw.get("turns", 0)),
                     fill_fraction=float(raw.get("fill_fraction", 0.0)),
+                    turn_number=int(raw.get("turn_number", 0)),
                 )
             except Exception:
                 pass

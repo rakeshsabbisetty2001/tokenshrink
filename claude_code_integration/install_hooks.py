@@ -45,6 +45,7 @@ def make_hook_config(settings_path: Path) -> dict:
     user_prompt_hook = str(HOOK_ROOT / "compress_user_prompt.py")
     terse_mode_hook = str(HOOK_ROOT / "terse_mode.py")
     token_budget_hook = str(HOOK_ROOT / "token_budget.py")
+    command_rewriter_hook = str(HOOK_ROOT / "command_rewriter.py")
 
     py = python_cmd()
     return {
@@ -54,7 +55,12 @@ def make_hook_config(settings_path: Path) -> dict:
                     {
                         "type": "command",
                         "command": f'"{py}" "{terse_mode_hook}"',
-                    }
+                    },
+                    {
+                        "type": "command",
+                        "command": f'"{py}" "{command_rewriter_hook}"',
+                        "matcher": "Bash",
+                    },
                 ]
             }
         ],
@@ -101,6 +107,7 @@ def _is_tokenshrink_hook(hook: dict) -> bool:
             "compress_user_prompt",
             "terse_mode",
             "token_budget",
+            "command_rewriter",
         )
     )
 
@@ -112,7 +119,7 @@ def install(settings_path: Path, dry_run: bool):
 
     for event, entries in new_hooks.items():
         event_hooks = hooks.setdefault(event, [])
-        # Remove any existing TokenShrink entries for this event
+        # Flatten all new hooks for this event into one merged entry
         for entry in event_hooks:
             entry["hooks"] = [h for h in entry.get("hooks", []) if not _is_tokenshrink_hook(h)]
         # Add fresh entries
@@ -120,7 +127,7 @@ def install(settings_path: Path, dry_run: bool):
         hooks[event] = [e for e in event_hooks if e.get("hooks")]
 
     save_settings(settings_path, data, dry_run)
-    print("TokenShrink hooks installed (PreToolUse, PostToolUse, UserPromptSubmit, Stop).")
+    print("TokenShrink hooks installed (PreToolUse ×2, PostToolUse, UserPromptSubmit, Stop).")
     print("  TOKENSHRINK_DEBUG=1       — show per-tool compression stats")
     print("  TOKENSHRINK_TERSE=0       — disable brevity nudge")
     print("  TOKENSHRINK_BUDGET=0      — disable token budget display")
