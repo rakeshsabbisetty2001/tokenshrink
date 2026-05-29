@@ -167,12 +167,207 @@ def _filter_directory(output: str) -> str:
     return "\n".join(result)
 
 
+# ── Build log structurer ──────────────────────────────────────────────────────
+
+def _filter_tsc(output: str) -> str:
+    """Group TypeScript compiler errors by file."""
+    errors_by_file: dict[str, list[str]] = {}
+    other_errors: list[str] = []
+
+    for line in output.splitlines():
+        m = re.match(r"^(.+\.tsx?)\((\d+),(\d+)\): (error|warning) (TS\d+): (.+)$", line)
+        if m:
+            filepath, row, col, severity, code, msg = m.groups()
+            if severity == "error":
+                errors_by_file.setdefault(filepath, []).append(f"  ({row},{col}) {code}: {msg}")
+        elif re.search(r"\berror\b", line, re.I):
+            other_errors.append(line)
+
+    if not errors_by_file and not other_errors:
+        return output
+
+    total = sum(len(v) for v in errors_by_file.values()) + len(other_errors)
+    result = [f"[tsc: {total} error(s) in {len(errors_by_file)} file(s)]"]
+    for filepath, errs in sorted(errors_by_file.items()):
+        result.append(f"{filepath}: {len(errs)} error(s)")
+        result.extend(errs[:3])
+        if len(errs) > 3:
+            result.append(f"  ... {len(errs) - 3} more")
+    result.extend(other_errors[:5])
+    return "\n".join(result)
+
+
+def _filter_build_log(command: str, output: str) -> str:
+    """Structure build tool output: errors, warning counts, last 5 lines."""
+    if re.search(r"\btsc\b", command):
+        return _filter_tsc(output)
+
+    lines = output.splitlines()
+    error_lines: list[str] = []
+    warning_counts: dict[str, int] = {}
+
+    for line in lines:
+        if re.search(r"\berror\b|\bERROR\b|Error:", line):
+            error_lines.append(line)
+        elif re.search(r"\bwarning\b|\bWARN\b", line, re.I):
+            m = re.search(r"(?:warning|warn)[:\s]+([A-Za-z][\w\-/]+)", line, re.I)
+            key = m.group(1) if m else "general"
+            warning_counts[key] = warning_counts.get(key, 0) + 1
+
+    if not error_lines and not warning_counts:
+        # Build succeeded — just show tail
+        return "\n".join(lines[-5:]) if len(lines) > 5 else output
+
+    result: list[str] = []
+    if error_lines:
+        result.append(f"[Errors: {len(error_lines)}]")
+        result.extend(error_lines[:20])
+        if len(error_lines) > 20:
+            result.append(f"  ... {len(error_lines) - 20} more error(s)")
+    if warning_counts:
+        warn_parts = ", ".join(f"{k}:{v}" for k, v in sorted(warning_counts.items()))
+        result.append(f"[Warnings] {warn_parts}")
+    result.append("[Last lines]")
+    result.extend(lines[-5:])
+    return "\n".join(result)
+
+
+# ── Linter noise filter ───────────────────────────────────────────────────────
+
+def _filter_eslint_json(data: list) -> str:
+    """Compact ESLint JSON-format output."""
+    result: list[str] = []
+    seen_warn_rules: set[str] = set()
+    total_errors = total_warnings = 0
+
+    for file_result in data:
+        filepath = file_result.get("filePath", "")
+        short = filepath.replace("\\", "/").split("/")[-1]
+        messages = file_result.get("messages", [])
+        file_lines: list[str] = []
+
+        for msg in messages:
+            sev = msg.get("severity", 0)
+            rule = msg.get("ruleId") or "unknown"
+            text = msg.get("message", "")
+            loc = f"{msg.get('line',0)}:{msg.get('column',0)}"
+            if sev == 2:
+                total_errors += 1
+                file_lines.append(f"  {loc} error  {text} ({rule})")
+            elif sev == 1:
+                total_warnings += 1
+                if rule not in seen_warn_rules:
+                    seen_warn_rules.add(rule)
+                    file_lines.append(f"  {loc} warn   {text} ({rule})")
+
+        if file_lines:
+            result.append(f"{short}:")
+            result.extend(file_lines)
+
+    summary = f"[ESLint: {total_errors} errors, {total_warnings} warnings ({len(seen_warn_rules)} unique warning rules shown)]"
+    return ("\n".join(result) + "\n" + summary) if result else ""
+
+
+def _filter_ruff_text(output: str) -> str:
+    """Deduplicate ruff warning rules; keep all errors."""
+    seen_rules: set[str] = set()
+    result: list[str] = []
+    for line in output.splitlines():
+        m = re.search(r":\s+([A-Z]\d+)\s+", line)
+        if m:
+            rule = m.group(1)
+            if rule.startswith("W"):
+                if rule not in seen_rules:
+                    seen_rules.add(rule)
+                    result.append(line)
+                # else: drop duplicate warning rule
+            else:
+                result.append(line)  # errors always kept
+        else:
+            result.append(line)
+    return "\n".join(result)
+
+
+def _filter_linter_text(output: str) -> str:
+    """Generic line-based linter filter: deduplicate warnings by extracted rule name."""
+    seen_rules: set[str] = set()
+    result: list[str] = []
+    for line in output.splitlines():
+        lower = line.lower()
+        if "error" in lower:
+            result.append(line)
+        elif "warning" in lower or "warn" in lower:
+            # Try quoted rule, parenthesized code, or trailing rule name (eslint text format)
+            m = re.search(
+                r"['\"]([a-z][\w\-]{2,})['\"]"
+                r"|\(([A-Z]\d+)\)"
+                r"|[ \t]([a-z][\w\-]{3,})[ \t]*$",
+                line,
+            )
+            rule = next((g for g in (m.groups() if m else []) if g), line[:50])
+            if rule not in seen_rules:
+                seen_rules.add(rule)
+                result.append(line)
+        else:
+            result.append(line)
+    return "\n".join(result)
+
+
+def _filter_linter(command: str, output: str) -> str:
+    """Route linter output to the right filter."""
+    if re.search(r"\beslint\b", command):
+        try:
+            data = json.loads(output)
+            if isinstance(data, list):
+                filtered = _filter_eslint_json(data)
+                return filtered if filtered else output
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return _filter_linter_text(output)
+    if re.search(r"\bruff\b", command):
+        return _filter_ruff_text(output)
+    return _filter_linter_text(output)
+
+
+# ── Jest / Vitest filter ──────────────────────────────────────────────────────
+
+def _filter_jest(output: str) -> str:
+    """Collapse passing suites; keep failures and summary."""
+    lines = output.splitlines()
+    result: list[str] = []
+    pass_count = 0
+    in_failure = False
+
+    for line in lines:
+        # Suite result lines
+        if re.match(r"^\s*(PASS|✓)\s+", line):
+            pass_count += 1
+            continue
+        if re.match(r"^\s*(FAIL|✕|×)\s+", line):
+            in_failure = True
+            result.append(line)
+            continue
+        # Summary line
+        if re.match(r"^(Tests?|Test Suites?|Suites?):", line):
+            in_failure = False
+            result.append(line)
+            continue
+        if in_failure:
+            result.append(line)
+
+    prefix = [f"[{pass_count} suite(s) passed -- omitted]"] if pass_count else []
+    return "\n".join(prefix + result) if (prefix or result) else output
+
+
 def apply_bash_filter(command: str, output: str) -> str:
     """Route command output through the appropriate filter."""
     cmd = (command or "").strip()
 
     if re.search(r"\bpytest\b|\bpython\s+-m\s+(pytest|unittest)\b", cmd):
         return _filter_pytest(output)
+
+    if re.search(r"\b(jest|vitest)\b", cmd):
+        return _filter_jest(output)
 
     if re.search(r"\b(npm\s+(install|i)|pip3?\s+install|yarn\s+add)\b", cmd):
         return _filter_install(output)
@@ -182,6 +377,12 @@ def apply_bash_filter(command: str, output: str) -> str:
 
     if re.search(r"\bls\s+-\S*[la]\S*|\bfind\s+", cmd):
         return _filter_directory(output)
+
+    if re.search(r"\b(tsc\b|webpack\b|cargo\s+build|make\b|gradle\b|next\s+build)", cmd):
+        return _filter_build_log(cmd, output)
+
+    if re.search(r"\b(eslint|ruff\s+check|flake8|pylint)\b", cmd):
+        return _filter_linter(cmd, output)
 
     # Pattern-free: detect Python tracebacks in any output
     if "Traceback (most recent call last)" in output:

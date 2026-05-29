@@ -131,6 +131,33 @@ def benchmark(file, model, techniques):
     click.echo(f"{'TOTAL':<20} {result.original_tokens:>8} {result.compressed_tokens:>8} {result.original_tokens - result.compressed_tokens:>8} {result.reduction_pct:>5.1f}%")
 
 
+@main.command("estimate-cost")
+@click.argument("text", default="-")
+@click.option("--model", default="claude-sonnet-4-6", show_default=True, help="Model ID to price against.")
+@click.option("--no-compression", is_flag=True, help="Skip compression estimate; show raw cost only.")
+@click.option("--output", type=click.Choice(["text", "json"]), default="text", help="Output format.")
+def estimate_cost(text, model, no_compression, output):
+    """Estimate API cost for a prompt before sending. Reads from stdin if text is '-'."""
+    if text == "-":
+        text = sys.stdin.read()
+
+    ts = TokenShrink()
+    estimate = ts.estimate_cost(text, model=model, include_compression=not no_compression)
+
+    if output == "json":
+        click.echo(json.dumps({
+            "model": estimate.model,
+            "raw_tokens": estimate.raw_tokens,
+            "compressed_tokens": estimate.compressed_tokens,
+            "raw_usd": round(estimate.raw_usd, 6),
+            "compressed_usd": round(estimate.compressed_usd, 6),
+            "savings_usd": round(estimate.savings_usd, 6),
+            "savings_pct": round(estimate.savings_pct, 1),
+        }, indent=2))
+    else:
+        click.echo(str(estimate))
+
+
 @main.command("install-hooks")
 @click.option(
     "--settings",

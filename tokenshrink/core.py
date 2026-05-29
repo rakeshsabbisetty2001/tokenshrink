@@ -1,13 +1,43 @@
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Generator, Iterable
 
 from .counter import TokenCounter
 from .pipeline import Pipeline, PipelineResult
 from .compressors import whitespace, deduplication, format_optimizer, semantic_dedup
 from .compressors import rag_selector, conversation as conv_compressor
+
+_PRICING_FILE = Path(__file__).parent / "pricing.json"
+
+
+def _load_pricing() -> dict:
+    try:
+        return json.loads(_PRICING_FILE.read_text())
+    except Exception:
+        return {"models": {}}
+
+
+@dataclass
+class CostEstimate:
+    model: str
+    raw_tokens: int
+    compressed_tokens: int
+    raw_usd: float
+    compressed_usd: float
+    savings_usd: float
+    savings_pct: float
+
+    def __str__(self) -> str:
+        return (
+            f"Model: {self.model}\n"
+            f"Tokens: {self.raw_tokens:,} raw -> {self.compressed_tokens:,} compressed\n"
+            f"Cost:   ${self.raw_usd:.4f} raw -> ${self.compressed_usd:.4f} compressed\n"
+            f"Saved:  ${self.savings_usd:.4f} ({self.savings_pct:.1f}%)"
+        )
 
 
 @dataclass
@@ -145,6 +175,64 @@ class TokenShrink:
 
     def count_tokens(self, text: str) -> int:
         return self._counter.count(text)
+
+    def estimate_cost(
+        self,
+        text_or_messages: "str | list[dict]",
+        model: str = "claude-sonnet-4-6",
+        include_compression: bool = True,
+    ) -> CostEstimate:
+        """Estimate API cost before sending. No network calls made.
+
+        Args:
+            text_or_messages: A prompt string or list of {role, content} messages.
+            model: Model ID to price against (see tokenshrink/pricing.json).
+            include_compression: If True, also compute cost after compression.
+
+        Returns:
+            CostEstimate with raw/compressed token counts and USD costs.
+        """
+        pricing = _load_pricing()
+        rates = pricing.get("models", {}).get(model)
+        if rates is None:
+            # Unknown model — fall back to Sonnet pricing as a reasonable default
+            rates = {"input_per_mtok": 3.0, "output_per_mtok": 15.0}
+
+        input_rate = rates["input_per_mtok"] / 1_000_000
+
+        if isinstance(text_or_messages, list):
+            raw_text = " ".join(
+                (m.get("content") or "") if isinstance(m.get("content"), str)
+                else " ".join(
+                    b.get("text", "") for b in (m.get("content") or [])
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+                for m in text_or_messages
+            )
+        else:
+            raw_text = text_or_messages
+
+        raw_tokens = self._counter.count(raw_text)
+
+        if include_compression and raw_text.strip():
+            compressed_tokens = self._build_pipeline().run(raw_text).compressed_tokens
+        else:
+            compressed_tokens = raw_tokens
+
+        raw_usd = raw_tokens * input_rate
+        compressed_usd = compressed_tokens * input_rate
+        savings_usd = raw_usd - compressed_usd
+        savings_pct = (savings_usd / raw_usd * 100) if raw_usd > 0 else 0.0
+
+        return CostEstimate(
+            model=model,
+            raw_tokens=raw_tokens,
+            compressed_tokens=compressed_tokens,
+            raw_usd=raw_usd,
+            compressed_usd=compressed_usd,
+            savings_usd=savings_usd,
+            savings_pct=savings_pct,
+        )
 
 
 def _detect_and_wrap(client, ts: TokenShrink):
