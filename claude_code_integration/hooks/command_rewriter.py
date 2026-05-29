@@ -26,6 +26,9 @@ def main() -> None:
     except (json.JSONDecodeError, ValueError):
         sys.exit(0)
 
+    if os.environ.get("TOKENSHRINK_REWRITE", "1") == "0":
+        sys.exit(0)
+
     if data.get("tool_name") != "Bash":
         sys.exit(0)
 

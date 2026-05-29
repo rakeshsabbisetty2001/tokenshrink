@@ -61,15 +61,15 @@ class CompressionResult:
     @property
     def quality_score(self) -> float:
         """
-        Word-overlap Jaccard similarity between the original and compressed text.
-        Range [0, 1].  Higher means more vocabulary preserved.
+        Heuristic preservation score: word-overlap Jaccard similarity between original and compressed text.
+        Range [0, 1] — higher means more vocabulary retained. Smoke test only; not a semantic fidelity guarantee.
         """
         from .pipeline import _word_jaccard
         return _word_jaccard(self._original_text, self.compressed_text)
 
 
 class TokenShrink:
-    """Orchestrates lossless token compression across prompts, conversations, and RAG context."""
+    """Orchestrates meaning-preserving token compression across prompts, conversations, and RAG context."""
 
     def __init__(
         self,

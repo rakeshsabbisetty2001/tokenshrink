@@ -113,8 +113,7 @@ class PipelineResult:
     @property
     def quality_score(self) -> float:
         """
-        Word-overlap Jaccard similarity between original and compressed text.
-        Range [0, 1] — higher is better semantic preservation.
-        A lossless compressor on typical text should score > 0.85.
+        Heuristic preservation score: word-overlap Jaccard similarity between original and compressed text.
+        Range [0, 1] — higher means more vocabulary retained. Smoke test only; not a semantic fidelity guarantee.
         """
         return _word_jaccard(self.original_text, self.compressed_text)

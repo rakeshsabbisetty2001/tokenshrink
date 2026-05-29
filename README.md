@@ -1,8 +1,26 @@
 # TokenShrink
 
-Reduce LLM token usage by up to **70%** with a lossless compression pipeline. Works with Anthropic, OpenAI, or any LLM API — no meaning is lost, just waste.
+Reduce LLM token usage by up to **70%** with a meaning-preserving compression pipeline. Works with Anthropic, OpenAI, or any LLM API — no meaning is lost, just waste.
 
 Built specifically to keep **Claude Code dev sessions** from hitting usage limits, but usable anywhere tokens matter.
+
+## Quick Start
+
+```python
+from tokenshrink import TokenShrink
+
+ts = TokenShrink()
+result = ts.compress_prompt(your_long_prompt)
+print(result.compressed_text)
+print(f"Reduced by {result.reduction_pct:.1f}%")
+```
+
+Or install all Claude Code hooks in one command:
+
+```bash
+pip install -e ".[anthropic]"
+tokenshrink install-hooks
+```
 
 ## How it works
 
@@ -18,6 +36,21 @@ TokenShrink runs text through a configurable pipeline of compression techniques 
 | `conversation` | Redundant content in old conversation turns; cross-turn near-duplicates are also removed |
 
 Token counting auto-detects the best available backend: `tiktoken` → Anthropic `count_tokens` API (with local LRU cache) → character approximation.
+
+### Benchmark results
+
+Real numbers from the regression suite on representative inputs:
+
+| Input type | Technique | Reduction | Heuristic score |
+|---|---|---|---|
+| Pretty-printed JSON responses | `format` | 96% | 1.00 |
+| Duplicate RAG chunks | `deduplication` | 72% | 1.00 |
+| Repeated conversation context | `semantic_dedup` | 65% | 0.98 |
+| Repeated log error blocks | `deduplication` | 52% | 1.00 |
+| Markdown / XML with boilerplate | `format` | 23% | 1.00 |
+| Verbose system prompt (full pipeline) | all | 31% | 1.00 |
+
+*Heuristic score = word-overlap Jaccard [0–1]. Does not guarantee semantic fidelity; use it as a smoke test.*
 
 ---
 
@@ -318,7 +351,7 @@ The `command_rewriter` hook intercepts Bash commands before they run and rewrite
 | ≥ 70% | `npm test` | `npm test -- --reporter=min` |
 | ≥ 70% | `cargo test` | `cargo test 2>&1 \| tail -50` |
 
-A `systemMessage` is emitted so Claude knows the command was rewritten.
+A `systemMessage` is emitted so Claude knows the command was rewritten. All rewrites are transparent and reversible. Disable entirely with `TOKENSHRINK_REWRITE=0`.
 
 #### PostToolUse smart filters
 
@@ -368,6 +401,7 @@ Grep results with `-C` context flags often repeat the same surrounding lines acr
 |---|---|---|
 | `TOKENSHRINK_DEBUG` | off | Show per-tool compression stats as system messages |
 | `TOKENSHRINK_TERSE` | `1` | Set to `0` to disable the brevity nudge |
+| `TOKENSHRINK_REWRITE` | `1` | Set to `0` to disable Bash command rewriting entirely |
 | `TOKENSHRINK_BUDGET` | `1` | Set to `0` to disable the token budget display |
 | `TOKENSHRINK_CONTEXT_WINDOW` | `180000` | Assumed context window size for budget calculations |
 | `TOKENSHRINK_BUDGET_THRESHOLD` | `0.15` | Fraction of context used before budget status appears |
@@ -381,11 +415,11 @@ Grep results with `-C` context flags often repeat the same surrounding lines acr
 
 ## Compression Quality
 
-Every `CompressionResult` and `PipelineResult` exposes a `quality_score` — a word-overlap Jaccard similarity between the original and compressed text. It measures vocabulary preservation on a [0, 1] scale; a well-tuned lossless compressor on typical text scores above 0.85.
+Every `CompressionResult` and `PipelineResult` exposes a `quality_score` — a heuristic preservation score (word-overlap Jaccard similarity) between the original and compressed text. It measures vocabulary retention on a [0, 1] scale and serves as a smoke test, not a semantic fidelity guarantee. Synonyms, reordered sentences, or hallucinated removals can still score high.
 
 ```python
 result = ts.compress_prompt(text)
-print(f"{result.reduction_pct:.1f}% smaller, {result.quality_score:.3f} quality")
+print(f"{result.reduction_pct:.1f}% smaller, {result.quality_score:.3f} preservation score")
 ```
 
 The benchmark regression suite enforces a minimum `quality_score ≥ 0.5` per technique and `≥ 0.6` for the full pipeline, catching regressions that shrink tokens at the cost of content.
