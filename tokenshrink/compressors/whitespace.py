@@ -5,6 +5,8 @@ import re
 
 def compress(text: str, opts: dict) -> str:
     """Normalize whitespace without touching code blocks or quoted strings."""
+    if not isinstance(text, str):
+        return str(text) if text is not None else ""
     if not text:
         return text
 

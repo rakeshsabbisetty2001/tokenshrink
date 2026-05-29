@@ -4,15 +4,53 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+def _persistent_base() -> Path | None:
+    """
+    Return the persistent state directory, or None if it cannot be created.
+
+    Priority:
+    1. TOKENSHRINK_STATE_DIR env var (explicit override)
+    2. ~/.claude/tokenshrink/  (default persistent location)
+    3. None → caller falls back to OS temp dir
+    """
+    override = os.environ.get("TOKENSHRINK_STATE_DIR")
+    if override:
+        try:
+            p = Path(override).expanduser()
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        except OSError:
+            return None
+
+    default = Path.home() / ".claude" / "tokenshrink"
+    try:
+        default.mkdir(parents=True, exist_ok=True)
+        return default
+    except OSError:
+        return None
+
+
 def session_dir(session_id: str) -> Path:
+    """
+    Return (and create) the per-session state directory.
+
+    Tries the persistent location first (~/.claude/tokenshrink/<hash>).
+    Falls back to the OS temp dir if the persistent location is unavailable,
+    preserving the original behaviour for read-only home directories.
+    """
     key = hashlib.md5(session_id.encode()).hexdigest()[:8]
-    d = Path(tempfile.gettempdir()) / f"tokenshrink_{key}"
-    d.mkdir(exist_ok=True)
+    base = _persistent_base()
+    if base is not None:
+        d = base / key
+    else:
+        d = Path(tempfile.gettempdir()) / f"tokenshrink_{key}"
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 

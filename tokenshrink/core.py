@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Generator, Iterable
 
 from .counter import TokenCounter
 from .pipeline import Pipeline, PipelineResult
@@ -15,6 +16,7 @@ class CompressionResult:
     original_tokens: int
     compressed_tokens: int
     stages: list = field(default_factory=list)
+    _original_text: str = field(default="", repr=False)
 
     @property
     def ratio(self) -> float:
@@ -25,6 +27,15 @@ class CompressionResult:
     @property
     def reduction_pct(self) -> float:
         return self.ratio * 100
+
+    @property
+    def quality_score(self) -> float:
+        """
+        Word-overlap Jaccard similarity between the original and compressed text.
+        Range [0, 1].  Higher means more vocabulary preserved.
+        """
+        from .pipeline import _word_jaccard
+        return _word_jaccard(self._original_text, self.compressed_text)
 
 
 class TokenShrink:
@@ -76,6 +87,7 @@ class TokenShrink:
             original_tokens=result.original_tokens,
             compressed_tokens=result.compressed_tokens,
             stages=result.stages,
+            _original_text=text,
         )
 
     def compress_conversation(
@@ -105,6 +117,31 @@ class TokenShrink:
             yield wrapped
         finally:
             pass
+
+    def stream_compress(
+        self,
+        chunks: Iterable[str],
+        language: str = "auto",
+    ) -> Generator[str, None, None]:
+        """
+        Generator that compresses a stream of text chunks, yielding compressed
+        output as complete paragraphs are accumulated.
+
+        Suitable for Anthropic streaming API: feed each text_stream chunk,
+        collect the generator output, then drain the remainder automatically.
+
+        Example::
+
+            for compressed_chunk in ts.stream_compress(stream.text_stream):
+                sys.stdout.write(compressed_chunk)
+        """
+        from .streaming import StreamingCompressor
+        sc = StreamingCompressor(
+            techniques=list(self._techniques),
+            similarity_threshold=self._opts.get("similarity_threshold", 0.85),
+            language=language,
+        )
+        yield from sc.compress_stream(chunks)
 
     def count_tokens(self, text: str) -> int:
         return self._counter.count(text)

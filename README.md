@@ -13,7 +13,7 @@ TokenShrink runs text through a configurable pipeline of compression techniques 
 | `whitespace` | Trailing spaces, redundant blank lines, over-indentation |
 | `deduplication` | Exact duplicate paragraphs and blocks |
 | `format` | Verbose XML/markdown boilerplate and pretty-printed JSON (minified in place) |
-| `semantic_dedup` | Near-duplicate sentences using MinHash + Jaccard similarity |
+| `semantic_dedup` | Near-duplicate sentences using MinHash + Jaccard similarity (prose and code-aware) |
 | `rag` | Low-relevance RAG chunks via BM25 scoring |
 | `conversation` | Redundant content in old conversation turns; cross-turn near-duplicates are also removed |
 
@@ -53,6 +53,7 @@ result = ts.compress_prompt("Your long, verbose prompt text here...")
 
 print(result.compressed_text)
 print(f"Reduced by {result.reduction_pct:.1f}%")
+print(f"Quality score: {result.quality_score:.3f}")  # word-overlap Jaccard [0,1]
 # result.original_tokens, result.compressed_tokens also available
 ```
 
@@ -102,6 +103,30 @@ with ts.wrap(client) as c:
 
 Works with both Anthropic and OpenAI clients.
 
+**Streaming compression (for Anthropic streaming API):**
+```python
+from tokenshrink import TokenShrink
+
+ts = TokenShrink()
+
+# Generator-based: compresses as chunks arrive, yields when a paragraph completes
+with client.messages.stream(...) as stream:
+    for compressed_chunk in ts.stream_compress(stream.text_stream):
+        sys.stdout.write(compressed_chunk)
+
+# Or use StreamingCompressor directly for more control
+from tokenshrink import StreamingCompressor
+
+sc = StreamingCompressor(language="auto")  # "auto", "prose", or "code"
+for raw_chunk in stream.text_stream:
+    output = sc.feed(raw_chunk)
+    if output:
+        process(output)
+remainder = sc.flush()
+if remainder:
+    process(remainder)
+```
+
 **Configure which techniques run:**
 ```python
 ts = TokenShrink(
@@ -128,7 +153,10 @@ counter = TokenCounter()
 p = Pipeline(counter)
 p.add_compressor(FunctionCompressor("my_step", my_compressor, lossless=True))
 result = p.run("some text with  extra  spaces")
+print(f"Quality: {result.quality_score:.3f}")  # word-overlap Jaccard
 ```
+
+**Pipeline fault isolation:** if any compressor raises an exception, it is silently skipped and the pipeline continues with the previous output. Compressors that return `None` are also handled gracefully.
 
 ---
 
@@ -151,6 +179,11 @@ tokenshrink compress-conversation messages.json --keep-recent 5 --stats
 # Select top RAG chunks within a token budget
 tokenshrink select-context chunks.txt --query "your query" --max-tokens 2000 --stats
 tokenshrink select-context chunks.txt --query "code query" --bm25-k1 1.2 --bm25-b 0.5
+
+# Install / remove Claude Code hooks
+tokenshrink install-hooks
+tokenshrink install-hooks --settings /path/to/settings.local.json --dry-run
+tokenshrink uninstall-hooks
 ```
 
 **CLI flags:**
@@ -166,6 +199,8 @@ tokenshrink select-context chunks.txt --query "code query" --bm25-k1 1.2 --bm25-
 | `--chunk-sep` | Separator between RAG chunks in input file (default: `---`) |
 | `--bm25-k1` | BM25 term saturation parameter (default: 1.5; try 1.2 for code) |
 | `--bm25-b` | BM25 length normalization parameter (default: 0.75; try 0.5 for code) |
+| `--settings` | Path to Claude Code settings.local.json (install/uninstall-hooks) |
+| `--dry-run` | Preview hook changes without writing (install/uninstall-hooks) |
 
 ---
 
@@ -174,17 +209,20 @@ tokenshrink select-context chunks.txt --query "code query" --bm25-k1 1.2 --bm25-
 TokenShrink installs four hooks into Claude Code that together attack token consumption from every angle:
 
 ```bash
-# Install all hooks into Claude Code's settings.local.json
+# Install all hooks (CLI — preferred)
+tokenshrink install-hooks
+
+# Or run the installer script directly
 python claude_code_integration/install_hooks.py
 
 # Preview changes without writing
-python claude_code_integration/install_hooks.py --dry-run
+tokenshrink install-hooks --dry-run
 
 # Point to a custom settings file
-python claude_code_integration/install_hooks.py --settings /path/to/settings.local.json
+tokenshrink install-hooks --settings /path/to/settings.local.json
 
 # Remove all hooks
-python claude_code_integration/install_hooks.py --uninstall
+tokenshrink uninstall-hooks
 ```
 
 #### What each hook does
@@ -208,6 +246,10 @@ As the session context fills up, TokenShrink automatically escalates compression
 
 When context first crosses 70%, a one-shot imperative message fires:
 > `[TokenShrink] IMPORTANT: Context is at 72%. You must call /compact before taking any other action.`
+
+#### Session state persistence
+
+Token budget state persists across shell restarts in `~/.claude/tokenshrink/`. Override the location with `TOKENSHRINK_STATE_DIR`. Falls back to the OS temp dir if the home directory is read-only.
 
 #### Per-tool compression profiles
 
@@ -264,6 +306,38 @@ Grep results with `-C` context flags often repeat the same surrounding lines acr
 | `TOKENSHRINK_TOOL_PROFILES` | — | Path to a JSON file overriding per-tool compression profiles |
 | `TOKENSHRINK_NO_REMOTE_COUNT` | off | Set to `1` to force heuristic token counting (no API calls) |
 | `TOKENSHRINK_SUMMARIZE` | off | Set to `1` to enable extractive summarization of old conversation turns |
+| `TOKENSHRINK_STATE_DIR` | `~/.claude/tokenshrink` | Override persistent session state directory |
+
+---
+
+## Compression Quality
+
+Every `CompressionResult` and `PipelineResult` exposes a `quality_score` — a word-overlap Jaccard similarity between the original and compressed text. It measures vocabulary preservation on a [0, 1] scale; a well-tuned lossless compressor on typical text scores above 0.85.
+
+```python
+result = ts.compress_prompt(text)
+print(f"{result.reduction_pct:.1f}% smaller, {result.quality_score:.3f} quality")
+```
+
+The benchmark regression suite enforces a minimum `quality_score ≥ 0.5` per technique and `≥ 0.6` for the full pipeline, catching regressions that shrink tokens at the cost of content.
+
+---
+
+## Code-Aware Semantic Deduplication
+
+The `semantic_dedup` technique supports a `language` option that adjusts its stopword set to avoid treating code keywords as content-bearing tokens:
+
+```python
+ts = TokenShrink()
+result = ts.compress_prompt(code_heavy_text)           # auto-detects code
+
+# Or explicitly:
+from tokenshrink.compressors import semantic_dedup
+result = semantic_dedup.compress(text, {"language": "code"})   # Python/JS/SQL keywords as stopwords
+result = semantic_dedup.compress(text, {"language": "prose"})  # prose-only stopwords
+```
+
+In `"auto"` mode (default) the technique peeks at the text for common code patterns (`def`, `class`, `function`, `SELECT`, etc.) and selects the appropriate stopword set automatically.
 
 ---
 
@@ -276,7 +350,21 @@ pytest --cov=tokenshrink              # with coverage
 pytest tests/test_benchmark_regression.py -v   # benchmark regression suite
 ```
 
-The benchmark regression suite (`tests/test_benchmark_regression.py`) validates that each compressor achieves a minimum token reduction on representative real-world inputs (JSON API responses, repeated log errors, markdown boilerplate, duplicate RAG chunks, etc.). Run it after any compressor change to catch regressions.
+The test suite has **132 tests** across 11 modules:
+
+| Module | What it covers |
+|---|---|
+| `test_whitespace.py` | Whitespace normalization, code block preservation, idempotency |
+| `test_deduplication.py` | Exact paragraph dedup |
+| `test_format_optimizer.py` | JSON minification, XML/MD boilerplate stripping |
+| `test_semantic_dedup.py` | MinHash near-duplicate detection |
+| `test_rag_selector.py` | BM25 relevance scoring and token budget |
+| `test_conversation.py` | Cross-turn compression and extractive summarization |
+| `test_integration.py` | End-to-end compression ratios on realistic fixtures |
+| `test_benchmark_regression.py` | Minimum reduction % and quality score thresholds per technique |
+| `test_hooks.py` | All 4 Claude Code hooks (stdin/stdout simulation) |
+| `test_counter.py` | TokenCounter backends, LRU cache, env var override |
+| `test_edge_cases.py` | Empty inputs, malformed JSON, None inputs, broken code blocks, pipeline fault isolation, Unicode |
 
 ---
 
@@ -286,15 +374,16 @@ The benchmark regression suite (`tests/test_benchmark_regression.py`) validates 
 tokenshrink/
 ├── tokenshrink/
 │   ├── core.py              # TokenShrink main class
-│   ├── cli.py               # Click CLI commands
+│   ├── cli.py               # Click CLI (compress-prompt, benchmark, install-hooks, ...)
 │   ├── counter.py           # Auto-detecting token counter (tiktoken / Anthropic API / approx)
-│   ├── pipeline.py          # Compression pipeline runner with Compressor protocol support
+│   ├── pipeline.py          # Compression pipeline runner with quality_score metrics
+│   ├── streaming.py         # StreamingCompressor — chunk-based generator for streaming APIs
 │   ├── compressors/
 │   │   ├── base.py              # Compressor protocol + FunctionCompressor adapter
 │   │   ├── whitespace.py        # Whitespace normalization
 │   │   ├── deduplication.py     # Exact duplicate removal
 │   │   ├── format_optimizer.py  # XML/markdown boilerplate + JSON minification
-│   │   ├── semantic_dedup.py    # MinHash near-duplicate removal (cross-turn aware)
+│   │   ├── semantic_dedup.py    # MinHash near-duplicate removal (cross-turn + code-aware)
 │   │   ├── rag_selector.py      # BM25 chunk selection (configurable k1/b)
 │   │   └── conversation.py      # Conversation history compression + extractive summarization
 │   └── wrappers/
@@ -303,7 +392,7 @@ tokenshrink/
 │       └── base_wrapper.py
 ├── claude_code_integration/
 │   ├── install_hooks.py          # Hook installer / uninstaller
-│   ├── session_state.py          # Shared session state (fill fraction, token tallies)
+│   ├── session_state.py          # Persistent session state (~/.claude/tokenshrink/)
 │   ├── tool_profiles.py          # Per-tool compression profiles + fill escalation
 │   └── hooks/
 │       ├── terse_mode.py         # PreToolUse  — brevity nudge
@@ -313,8 +402,12 @@ tokenshrink/
 └── tests/
     ├── fixtures/
     │   ├── benchmark_corpus.py   # Representative inputs for regression benchmarks
-    │   └── ...
-    └── test_benchmark_regression.py  # Compressor regression suite
+    │   ├── verbose_prompts.py    # System prompts and RAG output fixtures
+    │   └── long_conversations.py # Multi-turn conversation fixture
+    ├── test_benchmark_regression.py  # Compressor regression + quality score suite
+    ├── test_hooks.py             # Claude Code hook integration tests
+    ├── test_counter.py           # TokenCounter unit tests
+    └── test_edge_cases.py        # Robustness: empty, malformed, Unicode, fault isolation
 ```
 
 ---

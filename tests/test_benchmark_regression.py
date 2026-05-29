@@ -54,6 +54,30 @@ def test_json_minification_is_lossless_json() -> None:
     assert original_data == compressed_data, "JSON minification changed the data"
 
 
+@pytest.mark.parametrize("case", ALL_CASES, ids=[c.name for c in ALL_CASES])
+def test_quality_score_above_threshold(case: BenchmarkCase) -> None:
+    """Compression must preserve vocabulary: quality_score (word Jaccard) >= 0.5."""
+    ts = TokenShrink(techniques=[case.technique])
+    result = ts.compress_prompt(case.text)
+
+    assert result.quality_score >= 0.5, (
+        f"[{case.name}] quality_score {result.quality_score:.3f} < 0.5 — "
+        "too many unique words lost during compression"
+    )
+
+
+def test_full_pipeline_quality_score_above_threshold() -> None:
+    """Full pipeline must preserve most vocabulary: quality_score >= 0.6."""
+    from tests.fixtures.benchmark_corpus import JSON_API_RESPONSE, REPEATED_LOG_ERRORS
+
+    ts = TokenShrink()
+    for case in (JSON_API_RESPONSE, REPEATED_LOG_ERRORS):
+        result = ts.compress_prompt(case.text)
+        assert result.quality_score >= 0.6, (
+            f"[{case.name}] full pipeline quality_score {result.quality_score:.3f} < 0.6"
+        )
+
+
 def test_idempotency_across_cases() -> None:
     """Applying a single lossless technique twice should yield the same result as once.
 

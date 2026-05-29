@@ -55,7 +55,12 @@ class Pipeline:
             if skip_lossy and not compressor.lossless:
                 continue
             before_tokens = self._counter.count(current)
-            current = compressor.compress(current, opts)
+            try:
+                result = compressor.compress(current, opts)
+                # Guard against compressors returning None or non-str
+                current = result if isinstance(result, str) else current
+            except Exception:
+                pass  # compressor failure: keep current text, record stage as no-op
             after_tokens = self._counter.count(current)
             stages.append(StageResult(compressor.name, before_tokens, after_tokens))
         original_tokens = stages[0].tokens_before if stages else self._counter.count(text)
@@ -67,6 +72,24 @@ class Pipeline:
             compressed_tokens=final_tokens,
             stages=stages,
         )
+
+
+def _word_jaccard(original: str, compressed: str) -> float:
+    """
+    Estimate semantic preservation via word-level Jaccard similarity.
+    Returns a float in [0, 1] where 1.0 means all words in the compressed
+    text also appeared in the original.  Empty inputs return 1.0.
+    """
+    import re
+    orig_words = set(re.findall(r"\b\w+\b", original.lower()))
+    comp_words = set(re.findall(r"\b\w+\b", compressed.lower()))
+    if not comp_words:
+        return 1.0
+    intersection = orig_words & comp_words
+    union = orig_words | comp_words
+    if not union:
+        return 1.0
+    return len(intersection) / len(union)
 
 
 @dataclass
@@ -86,3 +109,12 @@ class PipelineResult:
     @property
     def reduction_pct(self) -> float:
         return self.ratio * 100
+
+    @property
+    def quality_score(self) -> float:
+        """
+        Word-overlap Jaccard similarity between original and compressed text.
+        Range [0, 1] — higher is better semantic preservation.
+        A lossless compressor on typical text should score > 0.85.
+        """
+        return _word_jaccard(self.original_text, self.compressed_text)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import click
 
@@ -128,6 +129,52 @@ def benchmark(file, model, techniques):
         click.echo(f"{stage.name:<20} {stage.tokens_before:>8} {stage.tokens_after:>8} {stage.saved:>8} {stage.ratio*100:>5.1f}%")
     click.echo("-" * 56)
     click.echo(f"{'TOTAL':<20} {result.original_tokens:>8} {result.compressed_tokens:>8} {result.original_tokens - result.compressed_tokens:>8} {result.reduction_pct:>5.1f}%")
+
+
+@main.command("install-hooks")
+@click.option(
+    "--settings",
+    default=None,
+    help="Path to Claude Code settings.local.json (auto-detected if omitted).",
+)
+@click.option("--dry-run", is_flag=True, help="Preview changes without writing.")
+def install_hooks(settings, dry_run):
+    """Install TokenShrink hooks into Claude Code's settings.local.json."""
+    try:
+        from claude_code_integration.install_hooks import install, DEFAULT_SETTINGS
+    except ImportError:
+        click.echo(
+            "Error: claude_code_integration not found. "
+            "Run this command from the TokenShrink project root.",
+            err=True,
+        )
+        sys.exit(1)
+
+    path = Path(settings) if settings else DEFAULT_SETTINGS
+    install(path, dry_run)
+
+
+@main.command("uninstall-hooks")
+@click.option(
+    "--settings",
+    default=None,
+    help="Path to Claude Code settings.local.json (auto-detected if omitted).",
+)
+@click.option("--dry-run", is_flag=True, help="Preview changes without writing.")
+def uninstall_hooks(settings, dry_run):
+    """Remove TokenShrink hooks from Claude Code's settings.local.json."""
+    try:
+        from claude_code_integration.install_hooks import uninstall, DEFAULT_SETTINGS
+    except ImportError:
+        click.echo(
+            "Error: claude_code_integration not found. "
+            "Run this command from the TokenShrink project root.",
+            err=True,
+        )
+        sys.exit(1)
+
+    path = Path(settings) if settings else DEFAULT_SETTINGS
+    uninstall(path, dry_run)
 
 
 def _print_stats(original: int, compressed: int, stages):

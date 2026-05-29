@@ -49,6 +49,8 @@ def _minify_json_blobs(text: str) -> str:
 
 
 def compress(text: str, opts: dict) -> str:
+    if not isinstance(text, str):
+        return str(text) if text is not None else ""
     if not text:
         return text
 

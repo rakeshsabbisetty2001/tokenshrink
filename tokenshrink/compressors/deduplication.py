@@ -6,6 +6,8 @@ import re
 
 def compress(text: str, opts: dict) -> str:
     """Remove verbatim duplicate paragraphs/blocks using SHA-256 hashing."""
+    if not isinstance(text, str):
+        return str(text) if text is not None else ""
     if not text:
         return text
 

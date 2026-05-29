@@ -6,7 +6,8 @@ from math import log
 
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
-_STOPWORDS = frozenset(
+
+_STOPWORDS_PROSE = frozenset(
     "a an the is are was were be been being have has had do does did "
     "will would could should may might shall can i you he she it we they "
     "this that these those of in on at to for with by from as into about "
@@ -15,6 +16,43 @@ _STOPWORDS = frozenset(
     "than too very s t just don don't doesn doesn't didn didn't isn isn't "
     "aren aren't wasn wasn't weren weren't won won't wouldn wouldn't".split()
 )
+
+# Common keywords across Python, JavaScript, TypeScript, SQL — treated as
+# stopwords so code-aware dedup focuses on identifiers and literals instead.
+_STOPWORDS_CODE = frozenset(
+    # Python
+    "def class return import from as if elif else for while with try except "
+    "finally raise pass break continue lambda yield async await True False None "
+    "and or not in is del global nonlocal assert "
+    # JavaScript / TypeScript
+    "function var let const export default new typeof instanceof void "
+    "switch case this super extends implements interface enum abstract "
+    "public private protected readonly static "
+    # SQL
+    "select from where join inner outer left right on group by order having "
+    "insert into values update set delete create table drop alter index view "
+    "distinct count sum avg min max between like exists union all ".split()
+)
+
+# Detect whether text looks like code (heuristic: starts with keywords or
+# contains assignment / function-call patterns).
+_CODE_SIGNAL = re.compile(
+    r"^\s*(def |class |import |from |function |const |let |var |select |insert |update )",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_STOPWORDS = _STOPWORDS_PROSE  # default; overridden per-call based on language opt
+
+
+def _choose_stopwords(text: str, language: str) -> frozenset:
+    if language == "code":
+        return _STOPWORDS_PROSE | _STOPWORDS_CODE
+    if language == "prose":
+        return _STOPWORDS_PROSE
+    # "auto": peek at the text
+    if _CODE_SIGNAL.search(text):
+        return _STOPWORDS_PROSE | _STOPWORDS_CODE
+    return _STOPWORDS_PROSE
 
 _NUM_HASH_FUNCTIONS = 128
 _MINHASH_SEEDS = [random.Random(i).randint(0, 2**31) for i in range(_NUM_HASH_FUNCTIONS)]
@@ -48,11 +86,15 @@ def compress(text: str, opts: dict) -> str:
 
 def compress_with_seen(text: str, seen_sigs: list[list[int]], opts: dict) -> str:
     """Like compress(), but shares seen_sigs with the caller for cross-text deduplication."""
+    if not isinstance(text, str):
+        return str(text) if text is not None else ""
     if not text:
         return text
 
     threshold = opts.get("similarity_threshold", 0.85)
     unit = opts.get("unit", "sentence")  # "sentence" or "paragraph"
+    language = opts.get("language", "auto")  # "auto", "prose", or "code"
+    stopwords = _choose_stopwords(text, language)
 
     if unit == "paragraph":
         units = re.split(r"\n{2,}", text)
@@ -68,7 +110,7 @@ def compress_with_seen(text: str, seen_sigs: list[list[int]], opts: dict) -> str
         if not stripped:
             kept.append(unit_text)
             continue
-        content_words = [w for w in re.findall(r"\b\w+\b", stripped.lower()) if w not in _STOPWORDS]
+        content_words = [w for w in re.findall(r"\b\w+\b", stripped.lower()) if w not in stopwords]
         if len(content_words) < 5:
             kept.append(unit_text)
             continue
